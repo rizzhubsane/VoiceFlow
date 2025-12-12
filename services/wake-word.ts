@@ -5,12 +5,14 @@ const WAKE_WORD_VARIATIONS = [
   'hey voice', 'hey voiceflow', 
   'voice flo', 'voice low', 
   'boys flow', 'voice blow',
-  'force flow'
+  'force flow', 'okay voice',
+  'hi voice'
 ];
 
 export class WakeWordService {
   private recognition: any;
   private isListening: boolean = false;
+  private shouldRestart: boolean = false;
   private onWake: () => void;
   private onError: (err: any) => void;
 
@@ -27,19 +29,16 @@ export class WakeWordService {
       this.recognition.lang = 'en-US';
 
       this.recognition.onresult = (event: any) => {
+        // Debounce slightly? No, immediate reaction is better.
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const result = event.results[i];
           const transcript = result[0].transcript.toLowerCase().trim();
           
-          // Debug log for tuning
-          // console.log("Wake word transcript:", transcript, "Confidence:", result[0].confidence);
-
-          const isFinal = result.isFinal;
-          // Lower confidence threshold if it's a very close string match
           const hasKeyword = WAKE_WORD_VARIATIONS.some(w => transcript.includes(w));
           
-          if (hasKeyword && (isFinal || result[0].confidence > 0.5)) {
-             this.stop(); 
+          // Lower confidence acceptance for keywords
+          if (hasKeyword && (result.isFinal || result[0].confidence > 0.4)) {
+             this.stop(); // Stop listening immediately
              this.onWake();
              return; 
           }
@@ -47,51 +46,57 @@ export class WakeWordService {
       };
 
       this.recognition.onend = () => {
-        if (this.isListening) {
-           // Restart loop
+        if (this.shouldRestart) {
            try { 
              this.recognition.start(); 
            } catch (e) {
              console.warn("Wake word auto-restart failed", e);
+             this.isListening = false;
            }
+        } else {
+            this.isListening = false;
         }
       };
       
       this.recognition.onerror = (event: any) => {
           if (event.error === 'not-allowed') {
+              this.shouldRestart = false;
               this.isListening = false;
-              this.onError('Microphone permission denied for wake word.');
+              this.onError('Microphone blocked.');
           } else if (event.error === 'aborted') {
-              // Ignore
+              // Intentionally stopped
+              this.isListening = false;
           } else {
-             // console.log("Wake word error:", event.error);
+             // For other errors (no-speech, network), we might want to keep trying
+             // but let onend handle the restart check
           }
       };
     } else {
-        this.onError('Wake word detection not supported in this browser.');
+        this.onError('Wake word detection not supported.');
     }
   }
 
   start() {
     if (this.recognition && !this.isListening) {
+      this.shouldRestart = true;
       this.isListening = true;
       try { 
           this.recognition.start(); 
       } catch (e) {
-          console.warn("Wake word start ignored:", e);
+          console.warn("Wake word start failed:", e);
       }
     }
   }
 
   stop() {
-    this.isListening = false;
-    if (this.recognition) {
+    this.shouldRestart = false; // Prevent auto-restart
+    if (this.recognition && this.isListening) {
       try { 
-          // Abort closes the connection immediately, freeing the mic
           this.recognition.abort(); 
       } catch (e) {
           // Ignore
       }
     }
+    this.isListening = false;
   }
 }

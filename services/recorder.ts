@@ -3,15 +3,18 @@ export class AudioRecorder {
   private chunks: Blob[] = [];
   private stream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
-  private silenceTimer: any = null;
   private animationFrame: number | null = null;
+  private silenceNode: ScriptProcessorNode | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
 
   async start(onSilence?: () => void): Promise<void> {
     if (this.mediaRecorder && this.mediaRecorder.state === 'recording') return;
     
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.mediaRecorder = new MediaRecorder(this.stream);
+      
+      const mimeType = this.getSupportedMimeType();
+      this.mediaRecorder = new MediaRecorder(this.stream, { mimeType });
       this.chunks = [];
 
       this.mediaRecorder.ondataavailable = (e) => {
@@ -30,35 +33,53 @@ export class AudioRecorder {
     }
   }
 
+  private getSupportedMimeType(): string {
+    const types = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/ogg;codecs=opus',
+      ''
+    ];
+    for (const type of types) {
+      if (type === '' || MediaRecorder.isTypeSupported(type)) {
+        return type;
+      }
+    }
+    return '';
+  }
+
   private detectSilence(stream: MediaStream, onSilence: () => void) {
     this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const source = this.audioContext.createMediaStreamSource(stream);
     const analyser = this.audioContext.createAnalyser();
     analyser.fftSize = 2048;
-    source.connect(analyser);
+    analyser.smoothingTimeConstant = 0.8;
+    
+    this.sourceNode = this.audioContext.createMediaStreamSource(stream);
+    this.sourceNode.connect(analyser);
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
 
     let silenceStart = Date.now();
-    let hasSpoken = false; // Wait for user to speak at least once
+    let hasSpoken = false; 
 
     const checkSilence = () => {
       if (!this.mediaRecorder || this.mediaRecorder.state !== 'recording') return;
 
       analyser.getByteFrequencyData(dataArray);
 
-      // Simple average volume
+      // Average volume calculation
       let sum = 0;
       for (let i = 0; i < bufferLength; i++) {
         sum += dataArray[i];
       }
       const average = sum / bufferLength;
 
-      // Thresholds (0-255)
-      const SPEECH_THRESHOLD = 15; 
-      const SILENCE_THRESHOLD = 10;
-      const SILENCE_DURATION = 2000; // 2 seconds
+      // Adjusted thresholds
+      const SPEECH_THRESHOLD = 20; 
+      const SILENCE_THRESHOLD = 12;
+      const SILENCE_DURATION = 1500; // 1.5s silence
 
       if (average > SPEECH_THRESHOLD) {
         hasSpoken = true;
@@ -66,10 +87,10 @@ export class AudioRecorder {
       } else if (hasSpoken && average < SILENCE_THRESHOLD) {
         if (Date.now() - silenceStart > SILENCE_DURATION) {
           onSilence();
-          return; // Stop checking
+          return; 
         }
       } else if (!hasSpoken) {
-          // Keep resetting start time until they speak
+          // Reset silence start until speech is detected
           silenceStart = Date.now();
       }
 
@@ -81,9 +102,15 @@ export class AudioRecorder {
 
   async stop(): Promise<{ base64: string; mimeType: string }> {
     return new Promise((resolve, reject) => {
+      // Cleanup silence detection
       if (this.animationFrame) {
         cancelAnimationFrame(this.animationFrame);
         this.animationFrame = null;
+      }
+
+      if (this.sourceNode) {
+        this.sourceNode.disconnect();
+        this.sourceNode = null;
       }
 
       if (this.audioContext) {
@@ -102,7 +129,6 @@ export class AudioRecorder {
         const reader = new FileReader();
         reader.onloadend = () => {
           const result = reader.result as string;
-          // Extract base64 part
           const base64 = result.includes(',') ? result.split(',')[1] : result;
           this.cleanup();
           resolve({ base64, mimeType });
@@ -111,7 +137,12 @@ export class AudioRecorder {
         reader.readAsDataURL(blob);
       };
 
-      this.mediaRecorder.stop();
+      try {
+        this.mediaRecorder.stop();
+      } catch (e) {
+        this.cleanup();
+        resolve({ base64: '', mimeType: '' });
+      }
     });
   }
 
