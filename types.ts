@@ -16,13 +16,6 @@ export interface FileSystem {
   [path: string]: VirtualFile;
 }
 
-export interface EditOperation {
-  action: 'create' | 'edit' | 'delete';
-  path: string;
-  content?: string;
-  summary: string;
-}
-
 export interface LogEntry {
   id: string;
   timestamp: number;
@@ -40,6 +33,6 @@ export interface EditOperation {
   action: "create" | "edit" | "delete";
   path: string;
   content?: string;
-  language?: string;  // ← यह add करें
+  language?: string;
   summary: string;
 }
