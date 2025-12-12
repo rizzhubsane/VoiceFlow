@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GeminiService } from './services/gemini';
-import { SpeechService } from './services/speech';
+import { AudioRecorder } from './services/recorder';
 import { AppState, FileSystem, LogEntry } from './types';
 import { VoiceHud } from './components/VoiceHud';
 import { FileViewer } from './components/FileViewer';
@@ -28,6 +28,8 @@ const INITIAL_FILES: FileSystem = {
   }
 };
 
+type DragTarget = 'hud' | 'sidebar' | 'logs' | 'preview' | null;
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [files, setFiles] = useState<FileSystem>(INITIAL_FILES);
@@ -35,43 +37,44 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [lastTranscript, setLastTranscript] = useState('');
   
+  // Layout State
+  const [layout, setLayout] = useState({
+    hudHeight: 300,
+    sidebarWidth: 320,
+    logsHeight: 200,
+    previewWidth: 400
+  });
+  
+  const [dragging, setDragging] = useState<DragTarget>(null);
+  
   const geminiRef = useRef<GeminiService | null>(null);
-  const speechRef = useRef<SpeechService | null>(null);
+  const recorderRef = useRef<AudioRecorder | null>(null);
+  const appContainerRef = useRef<HTMLDivElement>(null);
 
-  // Initialize Services
-  useEffect(() => {
-    geminiRef.current = new GeminiService();
-    
-    speechRef.current = new SpeechService(
-      (text) => {
-        setLastTranscript(text);
-      },
-      () => {
-        // On End is handled by manual stop logic mostly
-      },
-      (error) => {
-        console.error("Speech Error:", error);
-        setAppState(AppState.ERROR);
-        addLog('error', `Microphone: ${error}`);
-      }
-    );
+  // --- Helper Functions (defined before effects) ---
 
-    addLog('system', 'VoiceFlow initialized. Ready.');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const addLog = useCallback((type: 'user' | 'system' | 'error', message: string) => {
+    setLogs(prev => [...prev, { 
+      id: Date.now().toString(), 
+      timestamp: Date.now(), 
+      type, 
+      message 
+    }]);
   }, []);
 
-  const addLog = (type: 'user' | 'system' | 'error', message: string) => {
-    setLogs(prev => [...prev, { id: Date.now().toString(), timestamp: Date.now(), type, message }]);
-  };
-
-  const processCommand = async (text: string) => {
-    if (!text.trim() || !geminiRef.current) return;
+  const processCommand = useCallback(async (input: string | { audioData: string, mimeType: string }) => {
+    if (!geminiRef.current) return;
 
     setAppState(AppState.PROCESSING);
-    addLog('user', text);
+    
+    if (typeof input === 'string') {
+        addLog('user', input);
+    } else {
+        addLog('user', '[Audio Command Sent]');
+    }
 
     try {
-      const operations = await geminiRef.current.generateEdits(text, files);
+      const operations = await geminiRef.current.generateEdits(input, files);
       
       if (operations.length === 0) {
         setAppState(AppState.IDLE);
@@ -111,55 +114,159 @@ export default function App() {
       setAppState(AppState.IDLE);
 
     } catch (error) {
-      console.error(error);
+      console.error('Process command error:', error);
       setAppState(AppState.ERROR);
       addLog('error', 'Failed to process command.');
       if (geminiRef.current) {
-        // Attempt to speak error, but don't block
         geminiRef.current.speak("I encountered an error.").catch(() => {});
       }
-      // Reset after a delay so user can try again
       setTimeout(() => setAppState(AppState.IDLE), 2000);
     }
-  };
+  }, [files, addLog]);
 
-  const handleMicClick = useCallback(() => {
+  const handleMicClick = useCallback(async () => {
     if (appState === AppState.IDLE || appState === AppState.ERROR || appState === AppState.SPEAKING) {
-      setLastTranscript('');
+      // START RECORDING
+      setLastTranscript(''); // Clear previous text
       setAppState(AppState.LISTENING);
-      speechRef.current?.start();
+      try {
+        await recorderRef.current?.start();
+        addLog('system', 'Recording audio...');
+      } catch (e) {
+        setAppState(AppState.ERROR);
+        addLog('error', 'Could not access microphone.');
+      }
     } else if (appState === AppState.LISTENING) {
-      speechRef.current?.stop();
-      // Allow transcript to settle
-      setTimeout(() => {
-        if (lastTranscript) {
-          processCommand(lastTranscript);
+      // STOP RECORDING & PROCESS
+      setAppState(AppState.PROCESSING);
+      try {
+        const audioResult = await recorderRef.current?.stop();
+        if (audioResult && audioResult.base64) {
+            processCommand({
+                audioData: audioResult.base64,
+                mimeType: audioResult.mimeType
+            });
         } else {
             setAppState(AppState.IDLE);
+            addLog('system', 'No audio recorded.');
         }
-      }, 500);
+      } catch (e) {
+        console.error(e);
+        setAppState(AppState.ERROR);
+        addLog('error', 'Error processing audio.');
+      }
     }
-  }, [appState, lastTranscript, files]); // Added dependencies
+  }, [appState, processCommand, addLog]);
 
   const handleTextSubmit = useCallback((text: string) => {
     processCommand(text);
-  }, [files]);
+  }, [processCommand]);
+
+  // --- Layout Handlers ---
+
+  const handleMouseDown = (target: DragTarget) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    setDragging(target);
+  };
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!dragging) return;
+
+    if (dragging === 'hud') {
+      setLayout(prev => ({
+        ...prev,
+        hudHeight: Math.max(150, Math.min(e.clientY, 600))
+      }));
+    } else if (dragging === 'sidebar') {
+      setLayout(prev => ({
+        ...prev,
+        sidebarWidth: Math.max(200, Math.min(e.clientX, 600))
+      }));
+    } else if (dragging === 'logs') {
+      const newHeight = window.innerHeight - e.clientY;
+      setLayout(prev => ({
+        ...prev,
+        logsHeight: Math.max(50, Math.min(newHeight, window.innerHeight - prev.hudHeight - 100))
+      }));
+    } else if (dragging === 'preview') {
+       const newWidth = window.innerWidth - e.clientX;
+       setLayout(prev => ({
+         ...prev,
+         previewWidth: Math.max(200, Math.min(newWidth, window.innerWidth - prev.sidebarWidth - 100))
+       }));
+    }
+  }, [dragging]);
+
+  const handleMouseUp = useCallback(() => {
+    setDragging(null);
+  }, []);
+
+
+  // --- Effects ---
+
+  // Initialize Services
+  useEffect(() => {
+    geminiRef.current = new GeminiService();
+    recorderRef.current = new AudioRecorder();
+
+    addLog('system', 'VoiceFlow initialized. Ready.');
+  }, [addLog]);
+
+  // Global Drag Events
+  useEffect(() => {
+    if (dragging) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    } else {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [dragging, handleMouseMove, handleMouseUp]);
+
 
   return (
-    <div className="flex flex-col h-screen bg-black text-gray-100 font-sans">
-      {/* Header / HUD */}
-      <VoiceHud 
-        appState={appState} 
-        onMicClick={handleMicClick} 
-        onTextSubmit={handleTextSubmit}
-        lastTranscript={lastTranscript}
-      />
+    <div 
+      className={`flex flex-col h-screen bg-black text-gray-100 font-sans overflow-hidden ${dragging ? 'cursor-grabbing select-none' : ''}`}
+      ref={appContainerRef}
+    >
+      {/* HUD Section */}
+      <div style={{ height: layout.hudHeight }} className="flex-shrink-0 relative">
+        <VoiceHud 
+          appState={appState} 
+          onMicClick={handleMicClick} 
+          onTextSubmit={handleTextSubmit}
+          lastTranscript={lastTranscript}
+        />
+        {/* HUD Resizer Handle */}
+        <div 
+          className="absolute bottom-0 left-0 right-0 h-1 bg-gray-800 hover:bg-blue-500 cursor-row-resize z-20 group"
+          onMouseDown={handleMouseDown('hud')}
+        >
+          <div className="absolute top-[-3px] bottom-[-3px] left-0 right-0 bg-transparent group-hover:bg-blue-500/20"></div>
+        </div>
+      </div>
 
       {/* Main Workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
         
         {/* Left: File Explorer & Logs */}
-        <div className="w-80 flex flex-col border-r border-gray-800 bg-gray-900">
+        <div 
+          style={{ width: layout.sidebarWidth }} 
+          className="flex flex-col border-r border-gray-800 bg-gray-900 relative flex-shrink-0"
+        >
+           {/* Sidebar Resizer Handle */}
+           <div 
+             className="absolute top-0 bottom-0 right-[-2px] w-1 bg-transparent hover:bg-blue-500 cursor-col-resize z-20 group"
+             onMouseDown={handleMouseDown('sidebar')}
+           >
+             <div className="absolute left-[-3px] right-[-3px] top-0 bottom-0 bg-transparent group-hover:bg-blue-500/20"></div>
+           </div>
+
+           {/* Files Section */}
            <div className="flex-1 overflow-hidden">
              <FileViewer 
                 files={files} 
@@ -168,8 +275,19 @@ export default function App() {
              />
            </div>
            
-           {/* Activity Log */}
-           <div className="h-1/3 border-t border-gray-800 bg-black p-2 overflow-y-auto text-xs font-mono">
+           {/* Logs Resizer Handle */}
+           <div 
+             className="h-1 bg-gray-800 hover:bg-blue-500 cursor-row-resize z-20 relative group flex-shrink-0"
+             onMouseDown={handleMouseDown('logs')}
+           >
+             <div className="absolute top-[-3px] bottom-[-3px] left-0 right-0 bg-transparent group-hover:bg-blue-500/20"></div>
+           </div>
+
+           {/* Logs Section */}
+           <div 
+             style={{ height: layout.logsHeight }} 
+             className="bg-black p-2 overflow-y-auto text-xs font-mono flex-shrink-0"
+           >
              <div className="text-gray-500 uppercase font-bold mb-2">System Logs</div>
              {logs.map(log => (
                <div key={log.id} className={`mb-1 break-words ${
@@ -182,9 +300,9 @@ export default function App() {
            </div>
         </div>
 
-        {/* Center: Code View (Read Only) */}
-        <div className="flex-1 flex flex-col border-r border-gray-800 bg-[#1e1e1e]">
-          <div className="p-2 bg-gray-800 text-sm text-gray-300 flex justify-between">
+        {/* Center: Code View */}
+        <div className="flex-1 flex flex-col border-r border-gray-800 bg-[#1e1e1e] min-w-0">
+          <div className="p-2 bg-gray-800 text-sm text-gray-300 flex justify-between shrink-0">
             <span>{selectedFile || 'No file selected'}</span>
             <span className="text-xs opacity-50">Read-Only View</span>
           </div>
@@ -195,9 +313,20 @@ export default function App() {
           </div>
         </div>
 
+        {/* Preview Resizer Handle */}
+        <div 
+          className="w-1 bg-gray-800 hover:bg-blue-500 cursor-col-resize z-20 group relative flex-shrink-0"
+          onMouseDown={handleMouseDown('preview')}
+        >
+          <div className="absolute left-[-3px] right-[-3px] top-0 bottom-0 bg-transparent group-hover:bg-blue-500/20"></div>
+        </div>
+
         {/* Right: Live Preview */}
-        <div className="w-1/3 min-w-[300px] flex flex-col">
-          <PreviewFrame files={files} />
+        <div 
+          style={{ width: layout.previewWidth }} 
+          className="flex flex-col flex-shrink-0"
+        >
+          <PreviewFrame files={files} isResizing={dragging !== null} />
         </div>
 
       </div>

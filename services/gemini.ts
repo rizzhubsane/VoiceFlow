@@ -42,14 +42,14 @@ export class GeminiService {
     this.ai = new GoogleGenAI({ apiKey });
   }
 
-  async generateEdits(userPrompt: string, currentFiles: FileSystem): Promise<EditOperation[]> {
+  async generateEdits(input: string | { audioData: string, mimeType: string }, currentFiles: FileSystem): Promise<EditOperation[]> {
     const fileContext = Object.entries(currentFiles)
       .map(([path, file]) => `File: ${path}\n\`\`\`${file.language}\n${file.content}\n\`\`\``)
       .join('\n\n');
 
     const systemPrompt = `
       You are VoiceFlow, an AI coding engine.
-      Your goal is to modify the provided codebase based on user voice commands.
+      Your goal is to modify the provided codebase based on user voice commands or audio instructions.
       
       Current Project Files:
       ${fileContext}
@@ -67,9 +67,24 @@ export class GeminiService {
       Array of objects with: action, path, content, summary.
     `;
 
+    // Construct content parts based on input type
+    const parts: any[] = [];
+    if (typeof input === 'string') {
+      parts.push({ text: input });
+    } else {
+      parts.push({
+        inlineData: {
+          mimeType: input.mimeType,
+          data: input.audioData
+        }
+      });
+      // Add a text prompt to guide the model on how to handle the audio
+      parts.push({ text: "Listen to the audio command and modify the code accordingly." });
+    }
+
     const response = await this.ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: userPrompt,
+      contents: { parts },
       config: {
         systemInstruction: systemPrompt,
         responseMimeType: "application/json",
