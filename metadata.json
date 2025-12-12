@@ -1,0 +1,7 @@
+{
+  "name": "VoiceFlow",
+  "description": "A voice-first AI coding IDE designed for accessibility. Build software using natural language commands powered by Gemini 3.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
