@@ -6,9 +6,18 @@ interface VoiceHudProps {
   onMicClick: () => void;
   onTextSubmit: (text: string) => void;
   lastTranscript: string;
+  isHandsFree?: boolean;
+  onToggleHandsFree?: () => void;
 }
 
-export const VoiceHud: React.FC<VoiceHudProps> = ({ appState, onMicClick, onTextSubmit, lastTranscript }) => {
+export const VoiceHud: React.FC<VoiceHudProps> = ({ 
+  appState, 
+  onMicClick, 
+  onTextSubmit, 
+  lastTranscript,
+  isHandsFree = false,
+  onToggleHandsFree 
+}) => {
   const [inputText, setInputText] = useState('');
 
   const getStatusColor = () => {
@@ -27,7 +36,7 @@ export const VoiceHud: React.FC<VoiceHudProps> = ({ appState, onMicClick, onText
       case AppState.PROCESSING: return 'Analyzing Audio...';
       case AppState.SPEAKING: return 'Responding...';
       case AppState.ERROR: return 'Microphone Error';
-      default: return 'Tap to Record';
+      default: return isHandsFree ? "Listening for 'Hey VoiceFlow'..." : 'Tap to Record';
     }
   };
 
@@ -40,6 +49,22 @@ export const VoiceHud: React.FC<VoiceHudProps> = ({ appState, onMicClick, onText
 
   return (
     <div className="flex flex-col items-center justify-center p-6 bg-gray-900 relative h-full w-full overflow-hidden">
+      {/* Hands-free Toggle */}
+      {onToggleHandsFree && (
+        <div className="absolute top-4 right-4 flex items-center space-x-2 z-20">
+            <span className={`text-xs font-bold uppercase tracking-wider ${isHandsFree ? 'text-green-400' : 'text-gray-500'}`}>
+                Hands-Free {isHandsFree ? 'ON' : 'OFF'}
+            </span>
+            <button 
+                onClick={onToggleHandsFree}
+                className={`w-12 h-6 rounded-full p-1 transition-colors duration-300 focus:outline-none ${isHandsFree ? 'bg-green-900' : 'bg-gray-700'}`}
+                title="Toggle Hands-Free Mode"
+            >
+                <div className={`w-4 h-4 rounded-full bg-white shadow-md transform transition-transform duration-300 ${isHandsFree ? 'translate-x-6' : 'translate-x-0'}`} />
+            </button>
+        </div>
+      )}
+
       <div className="flex flex-col items-center z-10 w-full max-w-2xl">
         <button
           onClick={onMicClick}

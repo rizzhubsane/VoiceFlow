@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GeminiService } from './services/gemini';
 import { AudioRecorder } from './services/recorder';
+import { WakeWordService } from './services/wake-word';
 import { AppState, FileSystem, LogEntry } from './types';
 import { VoiceHud } from './components/VoiceHud';
 import { FileViewer } from './components/FileViewer';
@@ -36,6 +37,7 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>('index.html');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [lastTranscript, setLastTranscript] = useState('');
+  const [isHandsFree, setIsHandsFree] = useState(false);
   
   // Layout State
   const [layout, setLayout] = useState({
@@ -49,9 +51,13 @@ export default function App() {
   
   const geminiRef = useRef<GeminiService | null>(null);
   const recorderRef = useRef<AudioRecorder | null>(null);
+  const wakeWordRef = useRef<WakeWordService | null>(null);
   const appContainerRef = useRef<HTMLDivElement>(null);
+  
+  // Ref for the wake word handler to ensure stable identity for the service
+  const wakeWordHandlerRef = useRef<() => void>(() => {});
 
-  // --- Helper Functions (defined before effects) ---
+  // --- Helper Functions ---
 
   const addLog = useCallback((type: 'user' | 'system' | 'error', message: string) => {
     setLogs(prev => [...prev, { 
@@ -124,25 +130,12 @@ export default function App() {
     }
   }, [files, addLog]);
 
-  const handleMicClick = useCallback(async () => {
-    if (appState === AppState.IDLE || appState === AppState.ERROR || appState === AppState.SPEAKING) {
-      // START RECORDING
-      setLastTranscript(''); // Clear previous text
-      setAppState(AppState.LISTENING);
-      try {
-        await recorderRef.current?.start();
-        addLog('system', 'Recording audio...');
-      } catch (e) {
-        setAppState(AppState.ERROR);
-        addLog('error', 'Could not access microphone.');
-      }
-    } else if (appState === AppState.LISTENING) {
-      // STOP RECORDING & PROCESS
+  const stopRecording = useCallback(async () => {
       setAppState(AppState.PROCESSING);
       try {
         const audioResult = await recorderRef.current?.stop();
         if (audioResult && audioResult.base64) {
-            processCommand({
+            await processCommand({
                 audioData: audioResult.base64,
                 mimeType: audioResult.mimeType
             });
@@ -154,13 +147,105 @@ export default function App() {
         console.error(e);
         setAppState(AppState.ERROR);
         addLog('error', 'Error processing audio.');
+        setTimeout(() => setAppState(AppState.IDLE), 2000);
       }
+  }, [processCommand, addLog]);
+
+  const startRecording = useCallback(async (autoStop: boolean = false) => {
+      setLastTranscript(''); 
+      setAppState(AppState.LISTENING);
+      try {
+        // Pass the silence callback if hands-free is enabled (autoStop)
+        await recorderRef.current?.start(autoStop ? () => {
+            console.log("Silence detected, stopping...");
+            stopRecording();
+        } : undefined);
+        addLog('system', autoStop ? 'Listening (will stop on silence)...' : 'Recording audio...');
+      } catch (e) {
+        setAppState(AppState.ERROR);
+        addLog('error', 'Could not access microphone.');
+      }
+  }, [addLog, stopRecording]);
+
+
+  const handleMicClick = useCallback(async () => {
+    if (appState === AppState.LISTENING) {
+        stopRecording();
+    } else if (appState === AppState.IDLE || appState === AppState.ERROR || appState === AppState.SPEAKING) {
+        // When manually clicking, we don't usually want auto-silence-stop unless users prefer it,
+        // but let's keep manual control manual for now.
+        startRecording(isHandsFree); 
     }
-  }, [appState, processCommand, addLog]);
+  }, [appState, stopRecording, startRecording, isHandsFree]);
 
   const handleTextSubmit = useCallback((text: string) => {
     processCommand(text);
   }, [processCommand]);
+
+  // --- Wake Word Logic ---
+  
+  const handleWakeWordDetected = useCallback(async () => {
+      // Must double check state here because the closure might be slightly stale if called rapidly
+      setAppState(prev => {
+        if (prev !== AppState.IDLE) return prev;
+        
+        console.log("Wake word detected!");
+        addLog('system', "Wake word detected: 'Hey VoiceFlow'");
+        
+        // We need to trigger side effects. Since we can't do async inside setState updater,
+        // we'll do the effects outside.
+        // However, this callback is invoked by the service.
+        return AppState.SPEAKING; 
+      });
+
+      // Execute flow
+      // 1. Speak acknowledgement
+      try {
+        await geminiRef.current?.speak("I'm listening.");
+      } catch(e) { console.error(e); }
+      
+      // 2. Start recording (will set state to LISTENING)
+      startRecording(true);
+
+  }, [addLog, startRecording]);
+
+  // Update the ref whenever the handler changes, so the service always calls the fresh one
+  useEffect(() => {
+    wakeWordHandlerRef.current = handleWakeWordDetected;
+  }, [handleWakeWordDetected]);
+
+  // Initialize Services Once
+  useEffect(() => {
+     geminiRef.current = new GeminiService();
+     recorderRef.current = new AudioRecorder();
+     wakeWordRef.current = new WakeWordService(
+         () => {
+             // Use ref to avoid stale closures
+             if (wakeWordHandlerRef.current) {
+                 wakeWordHandlerRef.current();
+             }
+         },
+         (err) => addLog('error', err)
+     );
+     addLog('system', 'VoiceFlow initialized.');
+
+     return () => {
+         wakeWordRef.current?.stop();
+     };
+  }, []); // Run once on mount
+
+  // Manage Hands-Free State
+  useEffect(() => {
+      if (!wakeWordRef.current) return;
+      
+      // Only listen for wake word if hands-free is ON and we are IDLE
+      if (isHandsFree && appState === AppState.IDLE) {
+          wakeWordRef.current.start();
+      } else {
+          wakeWordRef.current.stop();
+      }
+  }, [isHandsFree, appState]);
+
 
   // --- Layout Handlers ---
 
@@ -201,18 +286,6 @@ export default function App() {
     setDragging(null);
   }, []);
 
-
-  // --- Effects ---
-
-  // Initialize Services
-  useEffect(() => {
-    geminiRef.current = new GeminiService();
-    recorderRef.current = new AudioRecorder();
-
-    addLog('system', 'VoiceFlow initialized. Ready.');
-  }, [addLog]);
-
-  // Global Drag Events
   useEffect(() => {
     if (dragging) {
       window.addEventListener('mousemove', handleMouseMove);
@@ -240,6 +313,8 @@ export default function App() {
           onMicClick={handleMicClick} 
           onTextSubmit={handleTextSubmit}
           lastTranscript={lastTranscript}
+          isHandsFree={isHandsFree}
+          onToggleHandsFree={() => setIsHandsFree(!isHandsFree)}
         />
         {/* HUD Resizer Handle */}
         <div 
