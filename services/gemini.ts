@@ -33,6 +33,7 @@ const decodeAudioData = async (
 
 export class GeminiService {
   private ai: GoogleGenAI;
+  private audioContext: AudioContext | null = null;
 
   constructor() {
     const apiKey = process.env.API_KEY || '';
@@ -40,6 +41,13 @@ export class GeminiService {
       console.error("API_KEY is missing from environment variables");
     }
     this.ai = new GoogleGenAI({ apiKey });
+  }
+
+  private getAudioContext(): AudioContext {
+    if (!this.audioContext) {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+    }
+    return this.audioContext;
   }
 
   async generateEdits(input: string | { audioData: string, mimeType: string }, currentFiles: FileSystem): Promise<EditOperation[]> {
@@ -141,7 +149,13 @@ export class GeminiService {
          throw new Error("No audio data received");
       }
 
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+      const audioContext = this.getAudioContext();
+      
+      // Ensure context is running (needed for some browsers if created before interaction)
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
       const audioBuffer = await decodeAudioData(
         decode(base64Audio),
         audioContext,
