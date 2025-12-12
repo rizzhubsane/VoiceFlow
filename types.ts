@@ -35,3 +35,11 @@ export interface IWindow extends Window {
   webkitSpeechRecognition: any;
   SpeechRecognition: any;
 }
+
+export interface EditOperation {
+  action: "create" | "edit" | "delete";
+  path: string;
+  content?: string;
+  language?: string;  // ← यह add करें
+  summary: string;
+}
